@@ -1,0 +1,7 @@
+{
+  "mode": "backtest",
+  "symbol": "AVAXUSDT",
+  "data_file": null,
+  "model_path": "checkpoints/models/best_model.zip",
+  "timestamp": "2025-05-07 21:33:24"
+}

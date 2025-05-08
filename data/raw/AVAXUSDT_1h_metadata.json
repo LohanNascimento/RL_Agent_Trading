@@ -1,0 +1,16 @@
+{
+  "asset": "AVAX",
+  "quote": "USDT",
+  "exchange": "binance",
+  "timeframe": "1h",
+  "start_date": "2022-01-01",
+  "end_date": "2025-05-07",
+  "validated": false,
+  "data_hash": "397a23df2931be5ef76c0c2519ff5455",
+  "rows": 29351,
+  "date_range": [
+    "2022-01-01",
+    "2025-05-07"
+  ],
+  "download_time": "2025-05-07 20:55:05"
+}

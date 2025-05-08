@@ -1,0 +1,21 @@
+# Configuração de Gerenciamento de Risco
+risk_manager:
+  risk_per_trade: 0.05  # 2% do capital por trade
+  rr_ratio: 3.0  # Relação risco:recompensa (Risk/Reward)
+  max_daily_loss: 0.10  # Limite diário de perda
+  max_position_size: 0.12  # Tamanho máximo de posição como % do capital
+  max_positions: 10  # Máximo de posições simultâneas
+  max_trades_per_day: 100  # Limite de trades por dia por símbolo
+  max_drawdown_percent: 0.15  # Stop se drawdown > 15%
+  enforce_trade_limit: true  # Ativa limites
+  leverage: 10  # Alavancagem padrão para todas as operações
+
+# Configuração para TrendFollowingStrategy
+trend_following:
+  rsi_oversold: 30     # Nível de RSI para entrada
+  rsi_overbought: 70   # Nível de RSI para saída
+
+# Configuração para ReversalStrategy
+reversal:
+  trend_lookback: 50   # Período para análise de tendência
+  volatility_lookback: 20  # Período para análise de volatilidade
