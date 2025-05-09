@@ -60,7 +60,7 @@ python scripts/run_testnet.py --monitor_only --symbols BTCUSDT ETHUSDT DOTUSDT
 ### Execução Única (um ciclo apenas)
 
 ```
-python scripts/run_testnet.py --run_once --symbols BTCUSDT ETHUSDT
+python scripts/run_testnet.py --run_once --symbols ADAUSDT ETHUSDT
 ```
 
 ### Execução Contínua (trading real)

@@ -1,3 +1,4 @@
+from random import expovariate
 import ccxt
 import time
 import logging
@@ -593,3 +594,5 @@ if __name__ == '__main__':
             timestamp, open_price, high, low, close, volume = candle
             timestamp_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp/1000))
             print(f"{timestamp_str}: O={open_price} H={high} L={low} C={close} V={volume}")
+
+            
