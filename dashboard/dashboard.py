@@ -35,7 +35,7 @@ class TradingDashboard:
     def load_metrics(self):
         """Carrega métricas dos arquivos de log"""
         try:
-            today_file = f"scripts/logs/status_{datetime.now().strftime('%Y%m%d')}.log"
+            today_file = f"logs/status_{datetime.now().strftime('%Y%m%d')}.json"
             if os.path.exists(today_file):
                 with open(today_file) as f:
                     return json.load(f)
@@ -63,12 +63,30 @@ class TradingDashboard:
         if not positions:
             st.info("Nenhuma posição ativa no momento")
             return
-            
-        df = pd.DataFrame([(k, v, 0.0) for k, v in positions.items()], 
-                        columns=['Símbolo', 'Tamanho', 'PnL'])
-        df['Direção'] = df['Tamanho'].apply(lambda x: 'LONG' if x > 0 else 'SHORT')
-        df['Tamanho'] = df['Tamanho'].abs()
         
+        data = []
+        for symbol, pos in positions.items():
+            # Garante que pos é um dict (novo formato)
+            if isinstance(pos, dict):
+                size = pos['size']
+                entry_price = pos['entry_price']
+            else:
+                # fallback para formato antigo (float)
+                size = pos
+                entry_price = 0.0
+
+            current_price = self.bot.get_market_price(symbol)
+            if current_price is None or entry_price == 0:
+                pnl = 0.0
+            elif size > 0:
+                pnl = (current_price - entry_price) * size
+            else:
+                pnl = (entry_price - current_price) * abs(size)
+            direction = 'LONG' if size > 0 else 'SHORT'
+            data.append((symbol, abs(size), pnl, direction))
+
+        df = pd.DataFrame(data, columns=['Símbolo', 'Tamanho', 'PnL', 'Direção'])
+
         st.subheader("🚀 Posições Abertas")
         st.dataframe(
             df,
@@ -83,7 +101,8 @@ class TradingDashboard:
                     "PnL (USDT)",
                     format="%.2f",
                     help="Profit and Loss da posição em USDT"
-                )
+                ),
+                "Direção": "Direção"
             }
         )
 
@@ -102,12 +121,12 @@ class TradingDashboard:
     def display_performance_chart(self):
         """Exibe gráfico de desempenho"""
         try:
-            perf_files = sorted(os.listdir("results/logs"), reverse=True)[:7]
+            perf_files = sorted(os.listdir("../scripts/logs"), reverse=True)[:7]
             data = []
             
             for f in perf_files:
                 if f.startswith('status'):
-                    with open(f"results/logs/{f}") as json_file:
+                    with open(f"../scripts/logs/{f}") as json_file:
                         data.append(json.load(json_file))
             
             if data:

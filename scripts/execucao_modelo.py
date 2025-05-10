@@ -18,7 +18,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s: %(message)s',
     handlers=[
-        logging.FileHandler(f'scripts/logs/execucao_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
+        logging.FileHandler(f'../logs/execucao_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
         logging.StreamHandler()
     ]
 )
@@ -28,7 +28,7 @@ class ExecutorModelo:
     """
     Classe para executar modelo treinado na Binance Testnet com múltiplos ativos.
     """
-    def __init__(self, config_path='config/env_config.yaml', risk_config_path='config/risk_config.yaml'):
+    def __init__(self, config_path='../config/env_config.yaml', risk_config_path='../config/risk_config.yaml'):
         # Cria diretório de logs se não existir
         os.makedirs('scripts/logs', exist_ok=True)
         
@@ -41,7 +41,7 @@ class ExecutorModelo:
         self.api_secret = os.environ.get('BINANCE_TESTNET_SECRET', '5169ec900dc7bb90ef5c28ab5db6ccd1eb1584080efca2ec4b41cd305b690a8b')
         
         # Caminho do modelo
-        self.model_path = self.env_config.get('model_path', 'checkpoints/best_model.zip')
+        self.model_path = self.env_config.get('model_path', '../checkpoints/best_model.zip')
         
         # Lista de símbolos para monitorar
         self.symbols = self.env_config['environment']['symbols']
@@ -399,7 +399,8 @@ class ExecutorModelo:
             }
             
             # Salva em arquivo JSON
-            with open(f'dryrun/logs/status_{datetime.now().strftime("%Y%m%d")}.json', 'w') as f:
+            os.makedirs('logs', exist_ok=True)
+            with open(f'logs/status_{datetime.now().strftime("%Y%m%d")}.json', 'w') as f:
                 json.dump(relatorio, f, indent=2)
                 
             logger.info(f"Métricas registradas: Saldo={saldo:.2f} | Posições abertas: {len(posicoes)}")

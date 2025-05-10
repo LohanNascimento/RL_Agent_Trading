@@ -20,9 +20,9 @@ from scripts.binance_futures_testnet import BinanceFuturesTestnet
 def parse_arguments():
     """Processa argumentos da linha de comando"""
     parser = argparse.ArgumentParser(description='Execução de modelo na Binance Testnet')
-    parser.add_argument('--config', type=str, default='config/env_config.yaml',
+    parser.add_argument('--config', type=str, default='../config/env_config.yaml',
                        help='Caminho para o arquivo de configuração do ambiente')
-    parser.add_argument('--risk_config', type=str, default='config/risk_config.yaml',
+    parser.add_argument('--risk_config', type=str, default='../config/risk_config.yaml',
                        help='Caminho para o arquivo de configuração de risco')
     parser.add_argument('--model_path', type=str,
                        help='Caminho para o modelo treinado (sobrescreve config)')

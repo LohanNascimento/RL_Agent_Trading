@@ -20,18 +20,18 @@ echo Logs serão salvos em: %LOG_FILE%
 REM Executa o sistema de trading
 REM Opções recomendadas:
 REM --interval 3600: verifica a cada 1 hora (timeframe é 1h)
-REM --model_path checkpoints/best_model.zip: usa o melhor modelo treinado
+REM --model_path ../checkpoints/best_model.zip: usa o melhor modelo treinado
 REM --symbols BTCUSDT ETHUSDT DOTUSDT: monitora apenas os ativos mais líquidos
 REM --log_level INFO: nível de log detalhado
 
-python ..scripts\run_testnet.py ^
+python ..\scripts\run_testnet.py ^
   --interval 3600 ^
-  --model_path checkpoints/best_model.zip ^
+  --model_path ../checkpoints/best_model.zip ^
   --symbols DOTUSDT ADAUSDT LINKUSDT AVAXUSDT XRPUSDT XLMUSDT ^
   --log_level INFO
 
 REM Para um trading real, remova a linha acima e descomente a linha abaixo (sem --monitor_only)
-REM python ..scripts\run_testnet.py ^
+REM python ..\scripts\run_testnet.py ^
 REM   --interval 3600 ^
 REM   --model_path ..\checkpoints\best_model.zip ^
 REM   --symbols DOTUSDT ADAUSDT TRONUSDT MATICUSDT XRPUSDT XLMUSDT ^

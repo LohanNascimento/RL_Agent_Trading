@@ -162,26 +162,22 @@ class BinanceFuturesTestnet:
             return 0
 
     def get_all_positions(self):
-        """Retorna todas as posições abertas"""
+        """Retorna todas as posições abertas com preço de entrada"""
         try:
             positions = self.exchange.fetch_positions()
             active_positions = {}
-            
             for pos in positions:
-                if float(pos['contracts'] or 0) > 0:
+                contracts = float(pos['contracts'] or 0)
+                if contracts > 0:
                     symbol = pos['symbol']
                     side = pos['side']
-                    size = float(pos['contracts'] or 0)
-                    
-                    if symbol not in active_positions:
-                        active_positions[symbol] = 0
-                    
-                    if side == 'long':
-                        active_positions[symbol] += size
-                    elif side == 'short':
-                        active_positions[symbol] -= size
-            
-            return {k: v for k, v in active_positions.items() if v != 0}
+                    entry_price = float(pos.get('entryPrice', 0))
+                    size = contracts if side == 'long' else -contracts
+                    active_positions[symbol] = {
+                        'size': size,
+                        'entry_price': entry_price
+                    }
+            return active_positions
         except Exception as e:
             logging.error(f'Erro ao consultar todas as posições: {e}')
             return {}
@@ -319,10 +315,10 @@ class BinanceFuturesTestnet:
             
             # Calcula exposição total
             exposure = 0
-            for symbol, pos_size in positions.items():
+            for symbol, pos_info in positions.items():
                 price = self.get_market_price(symbol)
-                if price and pos_size:
-                    exposure += abs(pos_size * price)
+                if price and pos_info['size']:
+                    exposure += abs(pos_info['size'] * price)
             
             # Calcula exposição percentual
             exposure_pct = (exposure / balance) * 100 if balance > 0 else 0
