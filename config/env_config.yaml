@@ -7,17 +7,16 @@ environment:
 #   - ETHUSDT
 #   - BTCUSDT
 #   - ADAUSDT
-#   - UNIUSDT
-#   - DOTUSDT
+   - UNIUSDT
+   - DOTUSDT
    - AVAXUSDT
-#   - DOGEUSDT
+   - DOGEUSDT
 #   - SOLUSDT
 #   - LINKUSDT
 #   - TRONUSDT
 #   - XRPUSDT
 #   - LTCUSDT
 #   - XLMUSDT
-  timeframe: 1h
   log_level: INFO    # Nível de log: DEBUG, INFO, WARNING, ERROR
 
 # Configuração de Observação
