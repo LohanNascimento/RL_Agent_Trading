@@ -1,0 +1,16 @@
+{
+  "asset": "BTC",
+  "quote": "USDT",
+  "exchange": "binance",
+  "timeframe": "5m",
+  "start_date": "2023-01-01",
+  "end_date": "2025-05-11",
+  "validated": true,
+  "data_hash": "ebb414ebeb80ee63498c5e0b13ae309b",
+  "rows": 248232,
+  "date_range": [
+    "2023-01-01",
+    "2025-05-11"
+  ],
+  "download_time": "2025-05-11 20:17:38"
+}

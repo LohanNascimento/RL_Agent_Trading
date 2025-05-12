@@ -24,7 +24,7 @@ class ReversalStrategy(BaseStrategy):
     def _get_market_structure(self, df):
         # Análise de tendência baseada em médias móveis
         sma = df['sma_14']
-        ema = df['ema_14']
+        ema = df['ema_21']
         uptrend = ema.iloc[-1] > sma.iloc[-1]
         downtrend = ema.iloc[-1] < sma.iloc[-1]
         return {'uptrend': uptrend, 'downtrend': downtrend}
@@ -63,9 +63,9 @@ class TrendFollowingStrategy(BaseStrategy):
 
     def check_entry(self, env, current_step):
         df = env.df.iloc[current_step - env.window_size:current_step]
-        ema = df['ema_14'].iloc[-1]
+        ema = df['ema_21'].iloc[-1]
         sma = df['sma_14'].iloc[-1]
-        ema_prev = df['ema_14'].iloc[-2]
+        ema_prev = df['ema_21'].iloc[-2]
         sma_prev = df['sma_14'].iloc[-2]
         rsi = df['rsi_14'].iloc[-1]
         adx = df['adx'].iloc[-1]
@@ -78,10 +78,52 @@ class TrendFollowingStrategy(BaseStrategy):
     def check_exit(self, env, current_step):
         df = env.df.iloc[current_step - env.window_size:current_step]
         # Condição: EMA cruza SMA para baixo ou RSI > overbought
-        ema = df['ema_14'].iloc[-1]
+        ema = df['ema_21'].iloc[-1]
         sma = df['sma_14'].iloc[-1]
-        ema_prev = df['ema_14'].iloc[-2]
+        ema_prev = df['ema_21'].iloc[-2]
         sma_prev = df['sma_14'].iloc[-2]
         rsi = df['rsi_14'].iloc[-1]
         cruzamento_baixa = ema_prev > sma_prev and ema < sma
         return cruzamento_baixa or rsi > self.rsi_overbought
+
+class ScalpMomentumStrategy(BaseStrategy):
+    def __init__(self, ema_fast=5, ema_slow=10, volume_threshold=1.5):
+        self.ema_fast = ema_fast
+        self.ema_slow = ema_slow
+        self.volume_threshold = volume_threshold  # Volume > 150% da média
+
+    def check_entry(self, env, current_step):
+        df = env.df.iloc[current_step - env.window_size:current_step]
+        # Condições de entrada
+        ema_cross = df['ema_5'].iloc[-1] > df['ema_10'].iloc[-1]
+        high_volume = df['volume'].iloc[-1] > (df['volume_ma_10'].iloc[-1] * self.volume_threshold)
+        rsi_cond = df['rsi_14'].iloc[-1] < 40  # Evita sobrecompra
+        return ema_cross and high_volume and rsi_cond
+
+    def check_exit(self, env, current_step):
+        df = env.df.iloc[current_step - env.window_size:current_step]
+        # Saída quando EMA rápida inverte ou RSI > 60
+        ema_cross_reverse = df['ema_5'].iloc[-1] < df['ema_10'].iloc[-1]
+        rsi_exit = df['rsi_14'].iloc[-1] > 60
+        return ema_cross_reverse or rsi_exit
+
+class ScalpVWAPStrategy(BaseStrategy):
+    def __init__(self, atr_multiplier=1.5):
+        self.atr_multiplier = atr_multiplier
+
+    def check_entry(self, env, current_step):
+        df = env.df.iloc[current_step - env.window_size:current_step]
+        # Entra se o preço está abaixo do VWAP (pullback) e ATR indica volatilidade
+        vwap_val = vwap(df)
+        atr_val = df['atr_14'].iloc[-1]
+        price = df['close'].iloc[-1]
+        return (price < vwap_val) and (atr_val > 0.005 * price)  # Ajuste conforme o ativo
+
+    def check_exit(self, env, current_step):
+        # Saída após atingir um take profit (1x ATR) ou stop loss (1.5x ATR)
+        entry_price = env.current_position_price
+        current_price = env.df.iloc[current_step]['close']
+        atr_val = env.df.iloc[current_step - env.window_size:current_step]['atr_14'].iloc[-1]
+        take_profit = entry_price + self.atr_multiplier * atr_val
+        stop_loss = entry_price - self.atr_multiplier * atr_val
+        return (current_price >= take_profit) or (current_price <= stop_loss)

@@ -30,7 +30,7 @@ class ExecutorModelo:
     """
     def __init__(self, config_path='../config/env_config.yaml', risk_config_path='../config/risk_config.yaml'):
         # Cria diretório de logs se não existir
-        os.makedirs('scripts/logs', exist_ok=True)
+        os.makedirs('../logs', exist_ok=True)
         
         # Carregar configurações
         self.env_config = load_config(config_path)
@@ -40,16 +40,26 @@ class ExecutorModelo:
         self.api_key = os.environ.get('BINANCE_TESTNET_KEY', 'af48d3f1963b76c51f52066079b70af894b059d230ef2a850001f4f7e9431327')
         self.api_secret = os.environ.get('BINANCE_TESTNET_SECRET', '5169ec900dc7bb90ef5c28ab5db6ccd1eb1584080efca2ec4b41cd305b690a8b')
         
-        # Caminho do modelo
-        self.model_path = self.env_config.get('model_path', '../checkpoints/best_model.zip')
-        
-        # Lista de símbolos para monitorar
-        self.symbols = self.env_config['environment']['symbols']
+        # Detecta se é config de trade ou de ambiente
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if 'trade' in self.env_config:
+            trade_cfg = self.env_config['trade']
+            self.symbols = trade_cfg['symbols']
+            model_path_cfg = trade_cfg.get('model_path', 'checkpoints/best_model.zip')
+            self.model_path = os.path.abspath(os.path.join(project_root, model_path_cfg))
+            self.intervalo_loop = trade_cfg.get('interval', 60)
+            self.log_level = trade_cfg.get('log_level', 'INFO')
+            self.window_size = self.env_config['trade'].get('window_size', 10)
+        else:
+            self.symbols = self.env_config['environment']['symbols']
+            model_path_cfg = self.env_config.get('model_path', 'checkpoints/best_model.zip')
+            self.model_path = os.path.abspath(os.path.join(project_root, model_path_cfg))
+            self.intervalo_loop = self.env_config['environment'].get('interval', 60)
+            self.log_level = self.env_config.get('log_level', 'INFO')
+            self.window_size = self.env_config.get('environment', {}).get('window_size', 10)
         logger.info(f"Monitorando os seguintes ativos: {self.symbols}")
         
         # Parâmetros de execução
-        self.window_size = self.env_config['environment']['window_size']
-        self.intervalo_loop = 60  # segundos entre verificações
         self.timeframe = '1h'  # Timeframe usado no treinamento
         
         # Inicializar cliente Binance Testnet
@@ -60,7 +70,7 @@ class ExecutorModelo:
             risk_per_trade=self.risk_config['risk_manager']['risk_per_trade'],
             rr_ratio=self.risk_config['risk_manager']['rr_ratio'],
             max_position_size=0.1,  # Limita a 10% do capital por posição
-            max_trades_per_day=1,   # Limita a 1 trade por símbolo por dia
+            max_trades_per_day=10,   # Limita a 1 trade por símbolo por dia
             max_drawdown_percent=0.15,  # Stop se drawdown > 15%
             enforce_trade_limit=True     # Ativa limites
         ))
@@ -128,7 +138,15 @@ class ExecutorModelo:
                 return None
                 
             # Features na mesma ordem usada no treinamento
-            features = self.env_config['observation']['features']
+            if 'observation' in self.env_config and 'features' in self.env_config['observation']:
+                features = self.env_config['observation']['features']
+            else:
+                # Fallback: lista padrão de features usadas no treinamento
+                features = [
+                    'sma_14', 'ema_21', 'macd', 'macd_signal', 
+                    'std_14', 'atr_14', 'bb_upper', 'bb_lower', 
+                    'rsi_14', 'stoch_k', 'stoch_d', 'roc_14', 'adx'
+                ]
             
             # Log das features disponíveis e esperadas
             logger.debug(f"Features disponíveis: {df_obs.columns.tolist()}")
@@ -144,9 +162,9 @@ class ExecutorModelo:
                 # Se modelo espera 12 features, usar apenas indicadores técnicos básicos
                 if expected_shape[1] == 12:
                     reduced_features = [
-                        'sma_14', 'ema_14', 'macd', 'macd_signal', 
+                        'sma_14', 'ema_21', 'macd', 'macd_signal', 
                         'std_14', 'atr_14', 'bb_upper', 'bb_lower', 
-                        'rsi_14', 'stoch_k', 'stoch_d', 'roc_14'
+                        'rsi_14', 'stoch_k', 'stoch_d', 'roc_14', 'adx'
                     ]
                     # Verificar se todas as features reduzidas existem
                     for feat in reduced_features:

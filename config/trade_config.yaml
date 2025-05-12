@@ -1,0 +1,21 @@
+trade:
+  api_key_env: af48d3f1963b76c51f52066079b70af894b059d230ef2a850001f4f7e9431327
+  api_secret_env: 5169ec900dc7bb90ef5c28ab5db6ccd1eb1584080efca2ec4b41cd305b690a8b
+  interval: 3600
+  log_level: INFO
+  logs_dir: logs
+  model_path: checkpoints/best_model.zip
+  monitor_only: false
+  run_once: false
+  symbols:
+  - ETHUSDT
+  - BTCUSDT
+  - USDCUSDT
+  - SOLUSDT
+  - PEPEUSDT
+  - XRPUSDT
+  - TRUMPUSDT
+  - SUIUSDT
+  - DOGEUSDT
+  - BNBUSDT
+  window_size: 10

@@ -1,0 +1,7 @@
+{
+  "mode": "backtest",
+  "symbol": "BTCUSDT",
+  "data_file": null,
+  "model_path": "checkpoints/best_model.zip",
+  "timestamp": "2025-05-11 23:13:01"
+}

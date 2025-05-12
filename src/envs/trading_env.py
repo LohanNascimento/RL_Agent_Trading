@@ -34,7 +34,7 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Discrete(3)
         # Lista de indicadores técnicos
         self.indicator_cols = [
-            'sma_14', 'ema_14', 'macd', 'macd_signal', 'std_14', 'atr_14',
+            'sma_14', 'ema_21', 'macd', 'macd_signal', 'std_14', 'atr_14',
             'bb_upper', 'bb_lower', 'rsi_14', 'stoch_k', 'stoch_d', 'roc_14'
         ]
         self.observation_space = spaces.Box(

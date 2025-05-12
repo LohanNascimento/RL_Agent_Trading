@@ -114,9 +114,10 @@ else:
 
 # Carregar múltiplos ativos se necessário
 dfs = []
+timeframe = env_cfg['environment']['timeframe']
 for sym in env_cfg['environment']['symbols']:
     try:
-        df = pd.read_csv(f'data/{sym}_1h.csv', parse_dates=['timestamp'])
+        df = pd.read_csv(f'data/raw/{sym}_{timeframe}.csv', parse_dates=['timestamp'])
         df['symbol'] = sym
         
         # Verificar valores negativos nos dados brutos
@@ -216,7 +217,7 @@ risk_manager = RiskManager(RiskParameters(
     enforce_trade_limit=False  # Desativa o limite de trades para o treinamento
 ))
 
-# Estratégia com configuração personalizada
+# Estratégia com configuração personalizada (ReversalStrategy, TrendFollowingStrategy, ScalpMomentumStrategy, ScalpVWAPStrategy)
 strategy = ReversalStrategy.from_config(risk_cfg['reversal'])
 
 # Instanciar ambiente, estratégia e risk manager

@@ -7,8 +7,9 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     # Tendência
     df['sma_14'] = df['close'].rolling(window=14).mean()
-    df['ema_14'] = df['close'].ewm(span=14, adjust=False).mean()
+    df['ema_21'] = df['close'].ewm(span=14, adjust=False).mean()
     df = adx(df, 14)
+    #df['ema_5'] = df['close'].ewm(span=5, adjust=False).mean()
     # MACD
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
@@ -27,6 +28,9 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Remove NaN iniciais
     df = df.dropna().reset_index(drop=True)
     return df
+    #Volume médio (VWAP)
+    #df['volume_ma_10'] = df['volume'].rolling(10).mean()
+
 
 def rsi(series, period=14):
     delta = series.diff()
@@ -81,3 +85,14 @@ def adx(df, period=14):
     df['plus_di'] = plus_di
     df['minus_di'] = minus_di
     return df
+
+def vwap(df):
+    cumulative_volume = df['volume'].cumsum()
+    cumulative_pv = (df['close'] * df['volume']).cumsum()
+    return cumulative_pv / cumulative_volume
+
+def stoch_rsi(series, period=14, k=3, d=3):
+    rsi_val = rsi(series, period)
+    stoch_k = 100 * (rsi_val - rsi_val.rolling(period).min()) / (rsi_val.rolling(period).max() - rsi_val.rolling(period).min())
+    stoch_d = stoch_k.rolling(k).mean()
+    return stoch_k, stoch_d

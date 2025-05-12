@@ -435,6 +435,9 @@ class BinanceFuturesTestnet:
                         logging.warning(f"Take Profit ajustado para {min_allowed_tp:.4f} (limite de {max_percent_distance:.1f}% com alavancagem {leverage}x)")
                         take_profit = min_allowed_tp
             
+            # Antes de criar SL/TP
+            self.cancel_close_orders(symbol, opposite_side)
+            
             # Envia ordem principal
             if order_type == 'market':
                 main_order = self.exchange.create_market_order(symbol, side, quantity, params=params)
@@ -469,6 +472,26 @@ class BinanceFuturesTestnet:
             sl_order = None
             if stop_loss is not None:
                 try:
+                    min_dist_pct = 0.001  # 0.1%
+                    min_dist = current_price * min_dist_pct
+
+                    # Para LONG
+                    if side == 'buy':
+                        if stop_loss > current_price - min_dist:
+                            stop_loss = current_price - min_dist
+                            logging.warning(f"Stop Loss ajustado para {stop_loss:.6f} para evitar trigger imediato.")
+                        if take_profit is not None and take_profit < current_price + min_dist:
+                            take_profit = current_price + min_dist
+                            logging.warning(f"Take Profit ajustado para {take_profit:.6f} para evitar trigger imediato.")
+                    # Para SHORT
+                    else:
+                        if stop_loss < current_price + min_dist:
+                            stop_loss = current_price + min_dist
+                            logging.warning(f"Stop Loss ajustado para {stop_loss:.6f} para evitar trigger imediato.")
+                        if take_profit is not None and take_profit > current_price - min_dist:
+                            take_profit = current_price - min_dist
+                            logging.warning(f"Take Profit ajustado para {take_profit:.6f} para evitar trigger imediato.")
+
                     sl_params = sl_tp_params.copy()
                     sl_params['stopPrice'] = stop_loss
                     sl_params['type'] = 'STOP_MARKET'
@@ -572,6 +595,18 @@ class BinanceFuturesTestnet:
         except Exception as e:
             logging.error(f'Erro ao definir alavancagem para {symbol}: {e}')
             return False
+
+    def cancel_close_orders(self, symbol, side):
+        """Cancela ordens abertas de stop/take profit (closePosition) para o símbolo e direção."""
+        open_orders = self.get_open_orders(symbol)
+        for order in open_orders:
+            # Cancela apenas ordens de fechamento (closePosition)
+            if order.get('info', {}).get('closePosition') and order['side'].lower() == side:
+                try:
+                    self.exchange.cancel_order(order['id'], symbol)
+                    logging.info(f"Ordem de fechamento cancelada: {order['id']} {symbol}")
+                except Exception as e:
+                    logging.warning(f"Erro ao cancelar ordem {order['id']} para {symbol}: {e}")
 
 if __name__ == '__main__':
     # Exemplo de uso
