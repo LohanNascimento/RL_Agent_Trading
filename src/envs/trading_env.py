@@ -9,7 +9,7 @@ from src.utils.risk_manager import RiskManager, RiskParameters
 class TradingEnv(gym.Env):
     """
     Ambiente de RL customizado para trading com Smart Money Concepts (SMC).
-    O vetor de estado inclui preço, volume, sinais SMC (FVG, BOS, CHOCH, liquidez), e indicadores técnicos.
+    O vetor de estado inclui preço, volume e indicadores técnicos.
     Ações discretas: 0 = Manter, 1 = Comprar, 2 = Vender.
     Recompensa baseada em P&L líquido e penalização de risco.
     """
@@ -34,7 +34,7 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Discrete(3)
         # Lista de indicadores técnicos
         self.indicator_cols = [
-            'sma_14', 'ema_14', 'macd', 'macd_signal', 'std_14', 'atr_14',
+            'sma_14', 'ema_21', 'macd', 'macd_signal', 'std_14', 'atr_14',
             'bb_upper', 'bb_lower', 'rsi_14', 'stoch_k', 'stoch_d', 'roc_14'
         ]
         self.observation_space = spaces.Box(
@@ -135,9 +135,22 @@ class TradingEnv(gym.Env):
             # Pequena penalidade por tentar violar limites de risco
             reward = -0.01
 
-        # Parâmetros de risco
-        position_type = 'long' if action == 1 else 'short'
-        position_size = self.risk_manager.calculate_position_size(self.balance, price)
+        # Calcula stop loss e take profit antes para determinar alavancagem
+        if action in [1, 2] and self.position == 0:
+            entry_type = 'long' if action == 1 else 'short'
+            temp_stop_loss, _ = self._calculate_risk_levels(price, entry_type)
+            
+            # Calcula distância percentual até o stop loss
+            stop_distance = abs(price - temp_stop_loss) / price
+            
+            # Calcula alavancagem baseada na distância do stop loss
+            # Quanto maior a distância, menor a alavancagem para manter risco constante
+            leverage = min(20, 0.02 / stop_distance)  # Máximo de 20x, risco alvo de 2%
+            
+            # Ajusta o tamanho da posição com base na alavancagem
+            position_size = self.risk_manager.calculate_position_size(self.balance, price) * leverage
+        else:
+            position_size = self.risk_manager.calculate_position_size(self.balance, price)
         
         # Limita o tamanho da posição para evitar valores extremos
         max_safe_position = 1000.0 / price  # Limita o valor máximo da posição

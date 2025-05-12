@@ -53,9 +53,9 @@ def parse_arguments():
                        help='Arquivo de configuração do ambiente')
     parser.add_argument('--risk_config', default='config/risk_config.yaml',
                        help='Arquivo de configuração de risco')
-    parser.add_argument('--model_path', default='checkpoints/models/best_model.zip',
+    parser.add_argument('--model_path', default='checkpoints/best_model.zip',
                        help='Caminho para o modelo treinado')
-    parser.add_argument('--symbol', default='UNIUSDT',
+    parser.add_argument('--symbol', default='BTCUSDT',
                        help='Par de trading para usar')
     parser.add_argument('--data_file', default=None,
                        help='Arquivo CSV com dados de preço (OHLCV)')
@@ -101,7 +101,7 @@ def load_and_validate_data(args, logger):
     if data_file is None:
         # Tenta inferir o arquivo de dados com base no símbolo
         symbol_name = args.symbol.replace('/', '')
-        data_file = f"data/raw/{symbol_name}_1h.csv"
+        data_file = f"data/raw/{symbol_name}_5m.csv"
         
     if not os.path.exists(data_file):
         logger.error(f"Arquivo de dados não encontrado: {data_file}")
@@ -139,7 +139,7 @@ def load_and_validate_data(args, logger):
     
     # Valida indicadores
     indicator_cols = [
-        'sma_14', 'ema_14', 'macd', 'macd_signal', 'std_14', 'atr_14',
+        'sma_14', 'ema_21', 'macd', 'macd_signal', 'std_14', 'atr_14',
         'bb_upper', 'bb_lower', 'rsi_14', 'stoch_k', 'stoch_d', 'roc_14'
     ]
     

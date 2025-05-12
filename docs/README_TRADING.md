@@ -66,7 +66,7 @@ python scripts/run_testnet.py --run_once --symbols ADAUSDT ETHUSDT
 ### Execução Contínua (trading real)
 
 ```
-python scripts/run_testnet.py --symbols BTCUSDT ETHUSDT DOTUSDT --interval 3600
+python scripts/run_testnet.py --symbols BTCUSDT ETHUSDT DOTUSDT ADAUSDT DOTUSDT --interval 3600
 ```
 
 ## Parâmetros Importantes

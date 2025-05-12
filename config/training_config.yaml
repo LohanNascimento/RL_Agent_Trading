@@ -26,3 +26,15 @@ checkpoint:
   save_freq: 1000  # Frequência de salvamento
   save_path: "checkpoints"  # Diretório para checkpoints
   keep_best: true   # Manter apenas o melhor modelo
+
+exploration:
+  initial_epsilon: 1.0    # Exploração máxima no início
+  final_epsilon: 0.01     # Exploração mínima no final
+  epsilon_decay_steps: 10000
+  use_softmax: False      # Usar Epsilon-Greedy por padrão
+
+exploration:
+  use_softmax: false  # Set to true to use softmax exploration
+  temperature: 0.5    # Temperature parameter for softmax
+  initial_epsilon: 1.0  # Used if not using softmax
+  final_epsilon: 0.01

@@ -7,7 +7,6 @@ from src.utils.config_loader import load_config
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList, StopTrainingOnNoModelImprovement
 from stable_baselines3.common.monitor import Monitor
-# import matplotlib.pyplot as plt  # Removido, não é mais necessário para gráficos
 import numpy as np
 import logging
 from sklearn.preprocessing import StandardScaler
@@ -114,9 +113,10 @@ else:
 
 # Carregar múltiplos ativos se necessário
 dfs = []
+timeframe = env_cfg['environment']['timeframe']
 for sym in env_cfg['environment']['symbols']:
     try:
-        df = pd.read_csv(f'data/{sym}_1h.csv', parse_dates=['timestamp'])
+        df = pd.read_csv(f'data/raw/{sym}_{timeframe}.csv', parse_dates=['timestamp'])
         df['symbol'] = sym
         
         # Verificar valores negativos nos dados brutos
@@ -216,7 +216,7 @@ risk_manager = RiskManager(RiskParameters(
     enforce_trade_limit=False  # Desativa o limite de trades para o treinamento
 ))
 
-# Estratégia com configuração personalizada
+# Estratégia com configuração personalizada (ReversalStrategy, TrendFollowingStrategy, ScalpMomentumStrategy, ScalpVWAPStrategy)
 strategy = ReversalStrategy.from_config(risk_cfg['reversal'])
 
 # Instanciar ambiente, estratégia e risk manager
@@ -251,6 +251,30 @@ except Exception as e:
     sys.exit(1)
 
 # Instancia modelo RL com parâmetros do YAML e otimizações de performance
+class EpsilonGreedyWrapper:
+    """Wrapper para adicionar decaimento de epsilon ao modelo PPO."""
+    def __init__(self, model, initial_epsilon=1.0, final_epsilon=0.01, decay_steps=1000000):
+        self.model = model
+        self.epsilon = initial_epsilon
+        self.final_epsilon = final_epsilon
+        self.decay_rate = (initial_epsilon - final_epsilon) / decay_steps
+
+    def decay_epsilon(self):
+        self.epsilon = max(self.final_epsilon, self.epsilon - self.decay_rate)
+
+    def predict(self, obs, deterministic=False):
+        if np.random.rand() < self.epsilon and not deterministic:
+            return self.model.action_space.sample(), None  # Ação aleatória
+        else:
+            return self.model.predict(obs, deterministic=deterministic)
+
+def softmax_action(model, obs, temperature=1.0):
+    """Seleciona ação usando softmax com temperatura ajustável."""
+    logits = model.policy.predict(obs)[0]
+    probs = np.exp(logits / temperature) / np.sum(np.exp(logits / temperature))
+    return np.random.choice(len(probs), p=probs), None
+
+# Após criar o modelo PPO, envolva-o com o EpsilonGreedyWrapper se não estiver usando softmax
 model = PPO(
     "MlpPolicy",
     env,
@@ -266,55 +290,27 @@ model = PPO(
     verbose=1
 )
 
-# Callbacks
-# 1. Checkpoint para salvar o modelo periodicamente
-checkpoint_callback = CheckpointCallback(
-    save_freq=training_cfg['checkpoint']['save_freq'],
-    save_path=training_cfg['checkpoint']['save_path'],
-    name_prefix='rl_model'
-)
-
-# 2. Early stopping para interromper o treinamento quando não houver melhoria
-early_stopping_callback = StopTrainingOnNoModelImprovement(
-    max_no_improvement_evals=training_cfg['early_stopping']['patience'],
-    min_evals=5,
-    verbose=1
-)
-
-# 3. Avaliação periódica para monitorar performance
-eval_callback = EvalCallback(
-    eval_env,
-    best_model_save_path=training_cfg['checkpoint']['save_path'],
-    log_path=training_cfg['checkpoint']['save_path'],
-    eval_freq=training_cfg['checkpoint']['save_freq'],
-    n_eval_episodes=5,
-    deterministic=True,
-    callback_after_eval=early_stopping_callback,
-    render=False
-)
-
-# Combina todos os callbacks
-callback_list = CallbackList([checkpoint_callback, eval_callback])
-
-# Treinamento
-try:
-    model.learn(
-        total_timesteps=training_cfg['training']['total_timesteps'],
-        callback=callback_list,
-        tb_log_name=f"ppo_smc_{timestamp}"
+# Configura a exploração baseada nas configurações
+if training_cfg['exploration'].get('use_softmax', False):
+    exploration_wrapper = lambda obs: softmax_action(model, obs, temperature=training_cfg['exploration'].get('temperature', 0.5))
+else:
+    exploration_wrapper = EpsilonGreedyWrapper(
+        model,
+        initial_epsilon=training_cfg['exploration'].get('initial_epsilon', 1.0),
+        final_epsilon=training_cfg['exploration'].get('final_epsilon', 0.01),
+        decay_steps=training_cfg['training']['total_timesteps'] // 2
     )
-    
-    # Salva o modelo final
-    model.save(os.path.join(training_cfg['checkpoint']['save_path'], "final_model"))
-    logging.info(f"Modelo final salvo em {os.path.join(training_cfg['checkpoint']['save_path'], 'final_model')}")
-    
-except Exception as e:
-    logging.error(f"Erro durante o treinamento: {str(e)}")
-    raise
 
-# Função de validação da estratégia treinada
+# Envolve o modelo com o wrapper de epsilon-greedy
+model_wrapped = EpsilonGreedyWrapper(
+    model,
+    initial_epsilon=1.0,
+    final_epsilon=0.01,
+    decay_steps=training_cfg['training']['total_timesteps'] // 2  # Decai até metade do treinamento
+)
 
-def evaluate_model(env, model, price_series, plot=True, name='Validação'):
+# Modifica as funções de avaliação para usar o modelo wrapped
+def evaluate_model(env, model_wrapped, price_series, plot=True, name='Validação'):
     logging.info("\n===================== [EVAL] Início da avaliação =====================")
     obs, _ = env.reset()  # Compatível Gymnasium
     terminated = False
@@ -322,7 +318,10 @@ def evaluate_model(env, model, price_series, plot=True, name='Validação'):
     trade_log = []
     prev_position = 0
     while not (terminated or truncated):
-        action, _ = model.predict(obs)
+        if training_cfg['exploration'].get('use_softmax', False):
+            action, _ = model_wrapped(obs)  # Usa softmax durante avaliação
+        else:
+            action, _ = model_wrapped.predict(obs, deterministic=True)  # Usa epsilon-greedy
         obs, _, terminated, truncated, info = env.step(action)
         ts = price_series.index[min(env.unwrapped.current_step, len(price_series)-1)]
         # Marca entradas
