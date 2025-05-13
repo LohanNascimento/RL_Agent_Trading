@@ -48,20 +48,25 @@ class TradeMetrics:
             trade_data (dict): Dicionário contendo informações do trade.
                 Deve incluir pelo menos:
                 - 'entry_price': Preço de entrada
-                - 'exit_price': Preço de saída
                 - 'position_size': Tamanho da posição
                 - 'entry_time': Timestamp de entrada
-                - 'exit_time': Timestamp de saída
                 - 'type': Tipo de trade ('long' ou 'short')
+                - 'status': Status do trade ('open', 'closed', 'sl_hit', 'tp_hit')
+                
+                Para trades fechados, também deve incluir:
+                - 'exit_price': Preço de saída
+                - 'exit_time': Timestamp de saída
                 - 'pnl': Lucro/Prejuízo do trade
                 - 'pnl_pct': Lucro/Prejuízo em porcentagem
                 - 'fee': Taxa paga
-                - 'status': Status do trade ('open', 'closed', 'sl_hit', 'tp_hit')
         """
         try:
             # Valida os dados de entrada
-            required_fields = ['entry_price', 'exit_price', 'position_size', 'entry_time', 
-                             'exit_time', 'type', 'pnl', 'pnl_pct', 'fee', 'status']
+            required_fields = ['entry_price', 'position_size', 'entry_time', 'type', 'status']
+            
+            # Campos adicionais obrigatórios para trades fechados
+            if trade_data.get('status') not in ['open']:
+                required_fields.extend(['exit_price', 'exit_time', 'pnl', 'pnl_pct', 'fee'])
             
             for field in required_fields:
                 if field not in trade_data:
@@ -70,13 +75,19 @@ class TradeMetrics:
             # Adiciona o trade ao histórico
             self.history.append(trade_data)
             
-            # Atualiza as métricas
-            self._update_metrics(trade_data)
-            
-            logging.info(f"Trade registrado: {trade_data['type'].upper()} | "
-                        f"Entrada: {trade_data['entry_price']:.2f} | "
-                        f"Saída: {trade_data['exit_price']:.2f} | "
-                        f"P&L: {trade_data['pnl']:.2f} ({trade_data['pnl_pct']:.2f}%)")
+            # Atualiza as métricas apenas para trades fechados
+            if trade_data.get('status') not in ['open']:
+                self._update_metrics(trade_data)
+                
+                logging.info(f"Trade registrado: {trade_data['type'].upper()} | "
+                            f"Entrada: {trade_data['entry_price']:.2f} | "
+                            f"Saída: {trade_data['exit_price']:.2f} | "
+                            f"P&L: {trade_data['pnl']:.2f} ({trade_data['pnl_pct']:.2f}%)")
+            else:
+                # Log para trades abertos
+                logging.info(f"Trade aberto: {trade_data['type'].upper()} | "
+                            f"Entrada: {trade_data['entry_price']:.2f} | "
+                            f"Tamanho: {trade_data['position_size']:.4f}")
                         
         except Exception as e:
             logging.error(f"Erro ao registrar trade: {str(e)}")
@@ -230,7 +241,7 @@ class TradingEnv(gym.Env):
     """
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, df, window_size=10, initial_balance=1000, fee=0.001, strategy=None, risk_manager=None, symbols=None, log_level=logging.INFO):
+    def __init__(self, df, window_size=10, initial_balance=1000, fee=0.001, strategy=None, risk_manager=None, symbols=None, log_level=logging.INFO, enforce_max_drawdown=True):
         super().__init__()
         # Configura logging
         logging.basicConfig(level=log_level, format='%(asctime)s %(levelname)s:%(message)s')
@@ -239,6 +250,7 @@ class TradingEnv(gym.Env):
         self.symbols = symbols
         self.df = df.reset_index(drop=True)
         self.window_size = window_size  # Definido antes da validação
+        self.enforce_max_drawdown = enforce_max_drawdown  # Flag para ativar/desativar controle de drawdown
         
         # Validação dos dados de entrada
         self._validate_dataframe()
@@ -370,6 +382,7 @@ class TradingEnv(gym.Env):
         self.episode_profit = 0
         self.last_balance = self.initial_balance
         self.trade_count = 0
+        self.n_trades = 0  # Adiciona contador de trades acessível externamente
         
         # Reseta o histórico de preços no risk manager
         self.risk_manager.price_history = []
@@ -403,7 +416,11 @@ class TradingEnv(gym.Env):
                 raise IndexError(f"Índice {self.current_step} fora dos limites do DataFrame com tamanho {len(self.df)}")
                 
             row = self.df.iloc[self.current_step]
-            
+
+            # Adicionar penalidade proporcional ao drawdown se estiver ativado
+            if self.enforce_max_drawdown and self.max_drawdown > 0.1:  # 10% de drawdown
+                reward -= self.max_drawdown * 10  # Penalidade proporcional
+
             # Obtém o preço de fechamento atual
             if 'close' not in row:
                 raise KeyError("Coluna 'close' não encontrada no DataFrame")
@@ -433,16 +450,23 @@ class TradingEnv(gym.Env):
                 
             # Verifica limites de risco antes de qualquer ação
             try:
-                risk_check = self.risk_manager.check_trade_limits(self.balance, price)
-                if not risk_check['allowed'] and action != 0:  # Só permite manter posição
-                    warning_msg = f"Ação bloqueada: {risk_check['reason']}"
-                    logging.warning(warning_msg)
-                    event = f"blocked_{risk_check['reason'].replace(' ', '_')}"
-                    action = 0  # Força "manter"
-                    # Pequena penalidade por tentar violar limites de risco
-                    reward = -0.01
-                    info['event'] = event
-                    info['warning'] = warning_msg
+                if self.enforce_max_drawdown:
+                    risk_check = self.risk_manager.check_trade_limits(self.balance, price)
+                    if not risk_check['allowed'] and action != 0:  # Só permite manter posição
+                        warning_msg = f"Ação bloqueada: {risk_check['reason']}"
+                        logging.warning(warning_msg)
+                        event = f"blocked_{risk_check['reason'].replace(' ', '_')}"
+                        action = 0  # Força "manter"
+                        # Pequena penalidade por tentar violar limites de risco
+                        reward = -0.01
+                        info['event'] = event
+                        info['warning'] = warning_msg
+                else:
+                    # Quando o controle de drawdown está desativado, apenas registra o drawdown sem bloquear ações
+                    risk_check = self.risk_manager.check_trade_limits(self.balance, price, check_only=True)
+                    if not risk_check['allowed']:
+                        logging.info(f"Drawdown detectado ({risk_check['reason']}), mas ignorado devido a enforce_max_drawdown=False")
+                        info['drawdown_detected'] = risk_check['reason']
             except Exception as e:
                 error_msg = f"Erro ao verificar limites de risco: {str(e)}"
                 logging.error(error_msg)
@@ -507,6 +531,7 @@ class TradingEnv(gym.Env):
                     logging.info(f"[ABERTURA] LONG em {price:.2f} | SL: {self.stop_loss:.2f} | TP: {self.take_profit:.2f} | Saldo: {self.balance:.2f}")
                     event = 'open_long'
                     self.trade_count += 1
+                    self.n_trades += 1  # Incrementa o contador de trades
                     
                     self.risk_manager.register_trade({
                         'type': 'open_long',
@@ -544,6 +569,7 @@ class TradingEnv(gym.Env):
                     logging.info(f"[ABERTURA] SHORT em {price:.2f} | SL: {self.stop_loss:.2f} | TP: {self.take_profit:.2f} | Saldo: {self.balance:.2f}")
                     event = 'open_short'
                     self.trade_count += 1
+                    self.n_trades += 1  # Incrementa o contador de trades
                     
                     self.risk_manager.register_trade({
                         'type': 'open_short',
@@ -582,6 +608,7 @@ class TradingEnv(gym.Env):
                         reward = profit
                         logging.info(f"[FECHAMENTO MANUAL] LONG em {price:.2f} | PnL: {profit:.2f} ({pnl_pct:.2f}%) | Saldo: {self.balance:.2f}")
                         event = 'close_long_manual'
+                        self.n_trades += 1  # Incrementa o contador de trades
                         
                         self.risk_manager.register_trade({
                             'type': 'close_long_manual',
@@ -632,6 +659,7 @@ class TradingEnv(gym.Env):
                         reward = profit
                         logging.info(f"[FECHAMENTO MANUAL] SHORT em {price:.2f} | PnL: {profit:.2f} ({pnl_pct:.2f}%) | Saldo: {self.balance:.2f}")
                         event = 'close_short_manual'
+                        self.n_trades += 1  # Incrementa o contador de trades
                         
                         self.risk_manager.register_trade({
                             'type': 'close_short_manual',
@@ -680,9 +708,9 @@ class TradingEnv(gym.Env):
                 
         except Exception as e:
             # Captura qualquer exceção não tratada
-            error_msg = f"Erro inesperado em step: {str(e)}"
-            logging.error(error_msg, exc_info=True)
-            return self._get_observation(), -100, True, False, {'error': error_msg}
+                error_msg = f"Erro inesperado em step: {str(e)}"
+        logging.error(error_msg, exc_info=True)
+        return self._get_observation(), -100, True, False, {'error': error_msg}
 
         # Checagem automática de stop loss/take profit
         if self.position != 0 and hasattr(self, 'stop_loss') and hasattr(self, 'take_profit'):
@@ -715,6 +743,7 @@ class TradingEnv(gym.Env):
                         reward = profit
                         logging.info(f"[STOP LOSS] LONG atingido em {exit_price:.2f} | PnL: {profit:.2f} ({pnl_pct:.2f}%) | Saldo: {self.balance:.2f}")
                         event = 'stop_loss_long'
+                        self.n_trades += 1  # Incrementa o contador de trades
                         
                         self.risk_manager.register_trade({
                             'type': 'stop_loss_long',
@@ -759,6 +788,7 @@ class TradingEnv(gym.Env):
                         reward = profit
                         logging.info(f"[TAKE PROFIT] LONG atingido em {exit_price:.2f} | PnL: {profit:.2f} ({pnl_pct:.2f}%) | Saldo: {self.balance:.2f}")
                         event = 'take_profit_long'
+                        self.n_trades += 1  # Incrementa o contador de trades
                         
                         self.risk_manager.register_trade({
                             'type': 'take_profit_long',
@@ -804,6 +834,7 @@ class TradingEnv(gym.Env):
                         reward = profit
                         logging.info(f"[STOP LOSS] SHORT atingido em {exit_price:.2f} | PnL: {profit:.2f} ({pnl_pct:.2f}%) | Saldo: {self.balance:.2f}")
                         event = 'stop_loss_short'
+                        self.n_trades += 1  # Incrementa o contador de trades
                         
                         self.risk_manager.register_trade({
                             'type': 'stop_loss_short',
@@ -848,6 +879,7 @@ class TradingEnv(gym.Env):
                         reward = profit
                         logging.info(f"[TAKE PROFIT] SHORT atingido em {exit_price:.2f} | PnL: {profit:.2f} ({pnl_pct:.2f}%) | Saldo: {self.balance:.2f}")
                         event = 'take_profit_short'
+                        self.n_trades += 1  # Incrementa o contador de trades
                         
                         self.risk_manager.register_trade({
                             'type': 'take_profit_short',
@@ -883,6 +915,10 @@ class TradingEnv(gym.Env):
         # Penalidade por drawdown severo (adiciona pressão para controle de risco)
         if self.max_drawdown < -self.initial_balance * 0.1:  # Drawdown > 10%
             reward = reward * 0.8  # Reduz recompensa
+
+        # Adicionar penalidade proporcional ao drawdown se estiver ativado
+        if self.enforce_max_drawdown and self.max_drawdown > 0.1:  # 10% de drawdown
+            reward -= self.max_drawdown * 10  # Penalidade proporcional
 
         # Atualiza estado
         self.current_step += 1

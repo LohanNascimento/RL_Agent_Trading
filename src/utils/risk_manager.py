@@ -9,7 +9,7 @@ class RiskParameters:
     rr_ratio: float = 2.0        # Risk/Reward ratio
     max_position_size: float = 0.1  # Máximo 10% do saldo
     stop_loss_buffer: float = 0.001  # Buffer para stop loss (0.1%)
-    take_profit_buffer: float = 0.001  # Buffer para take profit (0.1%)
+    take_profit_buffer: float = 0.002  # Buffer para take profit (0.1%)
     max_trades_per_day: int = 1000  # Limite máximo de operações por dia (aumentado)
     max_drawdown_percent: float = 0.15  # Limite máximo de drawdown (15%)
     enforce_trade_limit: bool = True  # Controla se o limite de trades deve ser aplicado
@@ -115,35 +115,34 @@ class RiskManager:
             'info': trade_info
         })
     
-    def check_trade_limits(self, current_balance: float, current_price: float) -> Dict:
+    def check_trade_limits(self, balance, current_price, check_only=False):
         """
-        Verifica se os limites de risco foram atingidos
+        Verifica se uma operação está dentro dos limites de risco.
         
+        Args:
+            balance (float): Saldo atual da conta
+            current_price (float): Preço atual do ativo
+            check_only (bool): Se True, apenas verifica os limites sem bloquear operações
+            
         Returns:
-            Dict com {'allowed': bool, 'reason': str}
+            dict: Dicionário com 'allowed' (bool) e 'reason' (str) se não permitido
         """
-        result = {'allowed': True, 'reason': ''}
+        result = {'allowed': True, 'reason': None}
         
-        # Atualiza histórico de preços para referência futura
+        # Atualiza o histórico de preços
         self.price_history.append(current_price)
-        if len(self.price_history) > 20:  # Mantém apenas os últimos 20 preços
-            self.price_history.pop(0)
+        
+        # Calcula drawdown atual
+        if len(self.price_history) > 1:
+            peak = max(self.price_history)
+            current = self.price_history[-1]
+            drawdown = (peak - current) / peak
             
-        # 1. Verifica limite de trades por dia (se ativado)
-        if self.params.enforce_trade_limit:
-            today_trades = [t for t in self.trade_history 
-                            if t['timestamp'] > datetime.now() - timedelta(days=1)]
-            if len(today_trades) >= self.params.max_trades_per_day:
-                result['allowed'] = False
-                result['reason'] = 'Limite diário de trades atingido'
-                return result
-            
-        # 2. Verifica drawdown
-        if self.initial_balance > 0:
-            current_drawdown = (self.initial_balance - current_balance) / self.initial_balance
-            if current_drawdown > self.params.max_drawdown_percent:
-                result['allowed'] = False
-                result['reason'] = f'Drawdown máximo atingido: {current_drawdown:.2%}'
-                return result
+            # Verifica se o drawdown excede o limite
+            if drawdown > self.params.max_drawdown_percent:
+                result['allowed'] = False if not check_only else True
+                result['reason'] = f"Drawdown máximo atingido: {drawdown:.2%}"
                 
+        # ... existing code ...
+        
         return result

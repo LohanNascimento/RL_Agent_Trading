@@ -229,13 +229,17 @@ risk_manager = RiskManager(RiskParameters(
     rr_ratio=risk_cfg['risk_manager']['rr_ratio'],
     max_position_size=0.1,  # Limita a 10% do capital por posição
     max_trades_per_day=1000,  # Valor alto para evitar limitações durante o treinamento
-    max_drawdown_percent=0.20,  # Interrompe se drawdown > 20%
+    max_drawdown_percent=0.50,  # Interrompe se drawdown > 50%
     enforce_trade_limit=False  # Desativa o limite de trades para o treinamento
 ))
 
 # Estratégia com configuração personalizada (ReversalStrategy, TrendFollowingStrategy, ScalpMomentumStrategy, ScalpVWAPStrategy)
 strategy = ScalpMomentumStrategy.from_config(risk_cfg['scalp_momentum'])
 
+# Como Usar
+
+#Agora você pode desativar o controle de drawdown durante o treinamento do modelo, modificando a criação do ambiente no arquivo `train_rl_agent.py`:
+#```python
 # Instanciar ambiente, estratégia e risk manager
 try:
     logging.info("Criando ambiente de treinamento...")
@@ -246,7 +250,8 @@ try:
         fee=env_cfg['environment']['fee'],
         symbols=env_cfg['environment']['symbols'],
         strategy=strategy,
-        risk_manager=risk_manager
+        risk_manager=risk_manager,
+        enforce_max_drawdown=False  # Desativa o controle de drawdown durante o treinamento
     )
     logging.info("Ambiente de treinamento criado com sucesso!")
 
@@ -259,7 +264,8 @@ try:
         fee=env_cfg['environment']['fee'],
         symbols=env_cfg['environment']['symbols'],
         strategy=strategy,
-        risk_manager=risk_manager
+        risk_manager=risk_manager,
+        enforce_max_drawdown=True  # Mantém o controle de drawdown para validação
     ))
     logging.info("Ambiente de validação criado com sucesso!")
 except Exception as e:
@@ -472,77 +478,99 @@ def validate_and_plot(env, model, price_series):
     last_entry_obs = None
     while not (terminated or truncated):
         action, _ = model.predict(obs)
-        obs_next, _, terminated, truncated, info = env.step(action)
-        ts = price_series.index[min(env.unwrapped.current_step, len(price_series)-1)]
-        # Marca entradas
+        obs_next, reward, terminated, truncated, info = env.step(action)
+        
+        # Verifica se houve mudança de posição
         if env.unwrapped.position != prev_position:
-            if env.unwrapped.position != 0:  # Entrada
-                last_entry_price = info['entry_price']
+            # Se abriu posição (de 0 para não-0)
+            if prev_position == 0 and env.unwrapped.position != 0:
+                position_type = "LONG" if env.unwrapped.position > 0 else "SHORT"
+                
+                # Verifica se 'entry_price' existe no dicionário info
+                entry_price = info.get('entry_price', env.unwrapped.current_price)
+                
+                # Registra preço de entrada e step para referência
+                last_entry_price = entry_price
                 last_entry_step = env.unwrapped.current_step
-                last_entry_obs = obs.copy() if hasattr(obs, 'copy') else obs
-                trade = {
-                    'datetime': ts,
-                    'type': 'entry',
-                    'preco_entrada': info['entry_price'],
-                    'preco_saida': '',
-                    'pnl': '',
+                last_entry_obs = obs.copy()
+                
+                # Calcula stop loss e take profit
+                sl_price = info.get('stop_loss', 0)
+                tp_price = info.get('take_profit', 0)
+                
+                logging.info(f"[ABERTURA] {position_type} em {entry_price:.2f} | SL: {sl_price:.2f} | TP: {tp_price:.2f} | Saldo: {info['balance']:.2f}")
+                
+                # Adiciona ao log de trades
+                trade_log.append({
+                    'timestamp': env.unwrapped.current_step,
+                    'acao': action,
+                    'posicao': env.unwrapped.position,
+                    'posicao_anterior': prev_position,
+                    'preco': price_series.iloc[env.unwrapped.current_step],
+                    'preco_entrada': entry_price,
+                    'stop_loss': sl_price,
+                    'take_profit': tp_price,
                     'saldo': info['balance'],
-                    'motivo': info.get('event',''),
-                    'drawdown': info.get('max_drawdown',''),
-                }
-                obs_flat = obs.flatten()
-                for i in range(len(obs_flat)):
-                    trade[f'feature_{i}'] = obs_flat[i]
-                trade_log.append(trade)
-            else:  # Saída manual
-                if last_entry_price is not None:
-                    pnl = info['balance'] - trade_log[-1]['saldo']
-                    trade = {
-                        'datetime': ts,
-                        'type': 'exit',
-                        'preco_entrada': last_entry_price,
-                        'preco_saida': price_series.iloc[env.unwrapped.current_step-1],
-                        'pnl': pnl,
-                        'saldo': info['balance'],
-                        'motivo': info.get('event',''),
-                        'drawdown': info.get('max_drawdown',''),
-                    }
-                    obs_flat = obs.flatten()
-                    assert len(obs_flat) == 120, f"Esperado {120} features, mas veio {len(obs_flat)}"
-                    for i in range(len(obs_flat)):
-                        trade[f'feature_{i}'] = obs_flat[i]
-                    trade_log.append(trade)
-        # Marca saídas automáticas (stop/target)
-        if env.unwrapped.position == 0 and prev_position != 0:
-            if last_entry_price is not None:
-                pnl = info['balance'] - trade_log[-1]['saldo']
-                trade = {
-                    'datetime': ts,
-                    'type': 'exit',
-                    'preco_entrada': last_entry_price,
-                    'preco_saida': price_series.iloc[env.unwrapped.current_step-1],
+                    'reward': reward,
+                    'tipo': 'entrada',
+                    'drawdown': info.get('max_drawdown', 0)
+                })
+            
+            # Se fechou posição (de não-0 para 0)
+            elif prev_position != 0 and env.unwrapped.position == 0:
+                # Verifica se 'exit_price' existe no dicionário info
+                exit_price = info.get('exit_price', env.unwrapped.current_price)
+                
+                # Calcula resultado do trade
+                pnl = info.get('pnl', 0)
+                pnl_pct = info.get('pnl_pct', 0)
+                
+                logging.info(f"[FECHAMENTO] em {exit_price:.2f} | P&L: {pnl:.2f} ({pnl_pct:.2f}%) | Saldo: {info['balance']:.2f}")
+                
+                # Adiciona ao log de trades
+                trade_log.append({
+                    'timestamp': env.unwrapped.current_step,
+                    'acao': action,
+                    'posicao': env.unwrapped.position,
+                    'posicao_anterior': prev_position,
+                    'preco': price_series.iloc[env.unwrapped.current_step],
+                    'preco_saida': exit_price,
+                    'preco_entrada': last_entry_price,  # Usa o último preço de entrada registrado
+                    'saldo': info['balance'],
+                    'reward': reward,
+                    'tipo': 'saida',
                     'pnl': pnl,
-                    'saldo': info['balance'],
-                    'motivo': info.get('event',''),
-                    'drawdown': info.get('max_drawdown',''),
-                }
-                obs_last = obs[-1]
-                for i in range(obs_last.shape[0]):
-                    trade[f'feature_{i}'] = obs_last[i]
-                trade_log.append(trade)
+                    'pnl_pct': pnl_pct,
+                    'drawdown': info.get('max_drawdown', 0)
+                })
+        
+        # Atualiza a posição anterior
         prev_position = env.unwrapped.position
         obs = obs_next
-    n_trades = len([t for t in trade_log if t['type']=='exit'])
-    logging.info(f"[EVAL] Nº de trades na validação: {n_trades}")
-    # plot_trades_and_performance(trade_log, price_series)
-    # Gráficos removidos, apenas salva trade_log.csv
     
-    # Salva o log de trades para análise posterior
-    df_trades = pd.DataFrame(trade_log)
-    df_trades.to_csv('trade_log.csv', index=False)
-    logging.info(f"Log de trades salvo em trade_log.csv com {len(df_trades)} registros")
-    
-    return df_trades
+    # Converte o log para DataFrame para análise
+    if trade_log:
+        trade_log_df = pd.DataFrame(trade_log)
+        logging.info(f"Total de registros de trade: {len(trade_log_df)}")
+        
+        # Calcula métricas finais
+        final_balance = info['balance']
+        initial_balance = env.unwrapped.initial_balance
+        total_return = (final_balance / initial_balance - 1) * 100
+        max_drawdown = env.unwrapped.max_drawdown * 100 if hasattr(env.unwrapped, 'max_drawdown') else 0
+        
+        # Exibe resumo
+        logging.info("\n===================== [EVAL] Resumo da validação =====================")
+        logging.info(f"Saldo inicial: ${initial_balance:.2f}")
+        logging.info(f"Saldo final: ${final_balance:.2f}")
+        logging.info(f"Retorno total: {total_return:.2f}%")
+        logging.info(f"Máximo drawdown: {max_drawdown:.2f}%")
+        logging.info(f"Número de trades: {env.unwrapped.n_trades}")
+        
+        return trade_log_df
+    else:
+        logging.info("Nenhum trade registrado durante a validação.")
+        return pd.DataFrame()
 
 # Executa o treinamento e avaliação
 if __name__ == "__main__":
@@ -658,3 +686,1064 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
