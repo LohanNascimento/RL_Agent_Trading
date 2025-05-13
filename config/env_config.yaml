@@ -17,6 +17,7 @@ environment:
 #   - XRPUSDT
 #   - LTCUSDT
 #   - XLMUSDT
+  timeframe: 1h
   log_level: INFO    # Nível de log: DEBUG, INFO, WARNING, ERROR
 
 # Configuração de Observação
@@ -40,4 +41,4 @@ observation:
     - plus_di
     - minus_di
   normalization: true  # Normalizar features entre -1 e 1
-  lookback: 10        # Período para cálculo de indicadores
+  lookback: 50        # Período para cálculo de indicadores

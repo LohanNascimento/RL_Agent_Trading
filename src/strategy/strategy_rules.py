@@ -91,6 +91,10 @@ class ScalpMomentumStrategy(BaseStrategy):
         self.ema_fast = ema_fast
         self.ema_slow = ema_slow
         self.volume_threshold = volume_threshold  # Volume > 150% da média
+        
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
     def check_entry(self, env, current_step):
         df = env.df.iloc[current_step - env.window_size:current_step]

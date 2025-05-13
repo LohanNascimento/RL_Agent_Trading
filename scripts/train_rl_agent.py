@@ -1,18 +1,21 @@
 import pandas as pd
-from src.envs.trading_env import TradingEnv
-from src.utils.technical_indicators import add_technical_indicators
-from src.strategy.strategy_rules import TrendFollowingStrategy, ReversalStrategy
-from src.utils.risk_manager import RiskManager, RiskParameters
-from src.utils.config_loader import load_config
+import numpy as np
+import logging
+import os
+import sys
+import torch
+from datetime import datetime
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList, StopTrainingOnNoModelImprovement
 from stable_baselines3.common.monitor import Monitor
-import numpy as np
-import logging
 from sklearn.preprocessing import StandardScaler
-import os
-import torch
-from datetime import datetime
+
+from src.envs.trading_env import TradingEnv
+from src.utils.technical_indicators import add_technical_indicators
+from src.strategy.strategy_rules import TrendFollowingStrategy, ReversalStrategy, ScalpMomentumStrategy
+from src.utils.risk_manager import RiskManager, RiskParameters
+from src.utils.config_loader import load_config
+from src.utils.train_pipeline import prepare_data, normalize_features, train_model
 
 # Configuração de logging padronizada
 logging.basicConfig(
@@ -63,40 +66,14 @@ def check_negative_values(df, stage_name):
             logging.warning(f"  - Coluna {col}: {count} valores negativos")
     return df
 
-# Função para normalizar dados com StandardScaler, apenas para indicadores técnicos
+# Função mantida para compatibilidade (encaminha para a nova função no módulo train_pipeline)
 def normalize_data(train_df, val_df, test_df, feature_cols):
-    # Colunas que não devem ser normalizadas (preços e volume)
-    price_cols = ['close', 'open', 'high', 'low', 'volume']
-    
-    # Filtrar apenas indicadores técnicos para normalização
-    indicator_cols = [col for col in feature_cols if col not in price_cols]
-    logging.info(f"Normalizando apenas indicadores técnicos: {indicator_cols}")
-    
-    if indicator_cols:
-        # Criar cópia dos DataFrames originais
-        train_norm = train_df.copy()
-        val_norm = val_df.copy()
-        test_norm = test_df.copy()
-        
-        # Aplicar StandardScaler apenas nos indicadores
-        scaler = StandardScaler()
-        scaler.fit(train_df[indicator_cols])
-        
-        train_norm[indicator_cols] = scaler.transform(train_df[indicator_cols])
-        val_norm[indicator_cols] = scaler.transform(val_df[indicator_cols])
-        test_norm[indicator_cols] = scaler.transform(test_df[indicator_cols])
-        
-        # Verificar se não há valores negativos nas colunas de preço após a normalização
-        for col in price_cols:
-            if col in train_norm.columns:
-                neg_count = (train_norm[col] < 0).sum()
-                if neg_count > 0:
-                    logging.error(f"Ainda existem {neg_count} valores negativos na coluna {col} após normalização!")
-                    
-        return train_norm, val_norm, test_norm, scaler
-    else:
-        logging.warning("Nenhum indicador técnico para normalizar, mantendo dados originais.")
-        return train_df, val_df, test_df, None
+    """
+    Função de compatibilidade que chama normalize_features do módulo train_pipeline.
+    Mantida para não quebrar código existente.
+    """
+    train_df, val_df, test_df, scaler = normalize_features(train_df, val_df, test_df, feature_cols)
+    return train_df, val_df, test_df, scaler
 
 # Carregar configurações dinâmicas
 training_cfg = load_config('config/training_config.yaml')
@@ -135,20 +112,44 @@ if not dfs:
     
 df_all = pd.concat(dfs, ignore_index=True)
 
-# Split de dados (train/val/test)
-split = training_cfg['split']
-total_len = len(df_all)
-train_end = int(total_len * split['train_size'])
-val_end = train_end + int(total_len * split['val_size'])
-train_df = df_all.iloc[:train_end].reset_index(drop=True)
-val_df = df_all.iloc[train_end:val_end].reset_index(drop=True)
-test_df = df_all.iloc[val_end:].reset_index(drop=True)
-
-# Adiciona indicadores técnicos ao DataFrame
+# Adiciona indicadores técnicos ao DataFrame completo antes da divisão
 logging.info("Adicionando indicadores técnicos...")
-train_df = add_technical_indicators(train_df)
-val_df = add_technical_indicators(val_df)
-test_df = add_technical_indicators(test_df)
+df_all = add_technical_indicators(df_all)
+
+# Divisão dos dados usando a função prepare_data do módulo train_pipeline
+try:
+    train_ratio = 0.7
+    val_ratio = 0.15
+    test_ratio = 0.15  # Calculado automaticamente como 1 - train_ratio - val_ratio
+
+    # Verifica se as proporções são válidas
+    if not (0 < train_ratio < 1) or not (0 <= val_ratio < 1) or not (0 <= test_ratio < 1):
+        raise ValueError("As proporções devem estar entre 0 e 1")
+    
+    if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-10:
+        raise ValueError(f"A soma das proporções deve ser igual a 1, mas é {train_ratio + val_ratio + test_ratio}")
+
+    logging.info(f"Dividindo dados em treino ({train_ratio*100:.0f}%), "
+                f"validação ({val_ratio*100:.0f}%) e teste ({test_ratio*100:.0f}%)")
+
+    # Usa a função prepare_data para fazer a divisão
+    train_df, val_df, test_df = prepare_data(
+        df=df_all,
+        feature_cols=env_cfg['observation']['features'],
+        split_ratios=(train_ratio, val_ratio),
+        time_col='timestamp',  # Garante a ordem temporal
+        shuffle=False  # Importante para manter a ordem temporal
+    )
+    
+    # Verifica a integridade dos dados após a divisão
+    if len(train_df) == 0 or len(val_df) == 0 or len(test_df) == 0:
+        raise ValueError("Um ou mais conjuntos de dados ficaram vazios após a divisão")
+        
+    logging.info(f"Divisão concluída: {len(train_df)} treino, {len(val_df)} validação, {len(test_df)} teste")
+    
+except Exception as e:
+    logging.error(f"Erro ao preparar os dados: {str(e)}")
+    raise
 
 # Verificar e corrigir valores negativos após adicionar indicadores
 logging.info("Verificando e corrigindo valores negativos após adicionar indicadores...")
@@ -186,20 +187,36 @@ if len(train_df) == 0 or len(val_df) == 0 or len(test_df) == 0:
     import sys
     sys.exit(1)
 
-# Normalização de dados
-feature_cols = env_cfg['observation']['features']
-logging.info(f"Verificando se temos todas as features necessárias...")
-for col in feature_cols:
-    if col not in train_df.columns:
-        logging.error(f"Coluna {col} não encontrada no DataFrame!")
-        for col_name in train_df.columns:
-            logging.info(f"Coluna disponível: {col_name}")
-        import sys
-        sys.exit(1)
-
-if env_cfg['observation'].get('normalization', True):
-    logging.info("Normalizando features...")
-    train_df, val_df, test_df, scaler = normalize_data(train_df, val_df, test_df, feature_cols)
+# Verificação e normalização de features
+try:
+    feature_cols = env_cfg['observation']['features']
+    
+    # Verifica se todas as features necessárias estão presentes
+    missing_cols = [col for col in feature_cols if col not in train_df.columns]
+    if missing_cols:
+        available_cols = train_df.columns.tolist()
+        raise ValueError(
+            f"Colunas de features não encontradas: {missing_cols}\n"
+            f"Colunas disponíveis: {available_cols}"
+        )
+    
+    # Aplica normalização se necessário
+    if env_cfg['observation'].get('normalization', True):
+        logging.info(f"Normalizando {len(feature_cols)} features...")
+        train_df, val_df, test_df, scaler = normalize_features(
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+            feature_cols=feature_cols
+        )
+        logging.info("Normalização concluída com sucesso")
+    else:
+        logging.info("Normalização de features desativada na configuração")
+        scaler = None
+        
+except Exception as e:
+    logging.error(f"Erro ao processar as features: {str(e)}")
+    raise
 
 # Criar diretório para logs com timestamp
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -212,12 +229,12 @@ risk_manager = RiskManager(RiskParameters(
     rr_ratio=risk_cfg['risk_manager']['rr_ratio'],
     max_position_size=0.1,  # Limita a 10% do capital por posição
     max_trades_per_day=1000,  # Valor alto para evitar limitações durante o treinamento
-    max_drawdown_percent=0.15,  # Interrompe se drawdown > 15%
+    max_drawdown_percent=0.20,  # Interrompe se drawdown > 20%
     enforce_trade_limit=False  # Desativa o limite de trades para o treinamento
 ))
 
 # Estratégia com configuração personalizada (ReversalStrategy, TrendFollowingStrategy, ScalpMomentumStrategy, ScalpVWAPStrategy)
-strategy = ReversalStrategy.from_config(risk_cfg['reversal'])
+strategy = ScalpMomentumStrategy.from_config(risk_cfg['scalp_momentum'])
 
 # Instanciar ambiente, estratégia e risk manager
 try:
@@ -274,43 +291,120 @@ def softmax_action(model, obs, temperature=1.0):
     probs = np.exp(logits / temperature) / np.sum(np.exp(logits / temperature))
     return np.random.choice(len(probs), p=probs), None
 
-# Após criar o modelo PPO, envolva-o com o EpsilonGreedyWrapper se não estiver usando softmax
-model = PPO(
-    "MlpPolicy",
-    env,
-    learning_rate=training_cfg['training']['learning_rate'],
-    n_steps=training_cfg['training']['n_steps'],
-    gamma=training_cfg['training']['gamma'],
-    gae_lambda=training_cfg['training']['gae_lambda'],
-    ent_coef=training_cfg['training']['ent_coef'],
-    vf_coef=training_cfg['training']['vf_coef'],
-    max_grad_norm=training_cfg['training']['max_grad_norm'],
-    tensorboard_log=log_dir,
-    device=device,
-    verbose=1
-)
+# Mover a definição do modelo para dentro da função train_agent
 
-# Configura a exploração baseada nas configurações
-if training_cfg['exploration'].get('use_softmax', False):
-    exploration_wrapper = lambda obs: softmax_action(model, obs, temperature=training_cfg['exploration'].get('temperature', 0.5))
-else:
-    exploration_wrapper = EpsilonGreedyWrapper(
-        model,
-        initial_epsilon=training_cfg['exploration'].get('initial_epsilon', 1.0),
-        final_epsilon=training_cfg['exploration'].get('final_epsilon', 0.01),
-        decay_steps=training_cfg['training']['total_timesteps'] // 2
-    )
+def train_agent():
+    """
+    Função principal para treinar o agente de RL.
+    Retorna o modelo treinado e os dados de teste para avaliação.
+    """
+    try:
+        # Cria diretório para logs do TensorBoard
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Nome para o log do TensorBoard
+        tb_log_name = f"PPO_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Cria o modelo PPO
+        model = PPO(
+            "MlpPolicy",
+            env,
+            learning_rate=training_cfg['training']['learning_rate'],
+            n_steps=training_cfg['training']['n_steps'],
+            gamma=training_cfg['training']['gamma'],
+            gae_lambda=training_cfg['training']['gae_lambda'],
+            ent_coef=training_cfg['training']['ent_coef'],
+            vf_coef=training_cfg['training']['vf_coef'],
+            max_grad_norm=training_cfg['training']['max_grad_norm'],
+            tensorboard_log=log_dir,
+            device=device,
+            verbose=1
+        )
 
-# Envolve o modelo com o wrapper de epsilon-greedy
-model_wrapped = EpsilonGreedyWrapper(
-    model,
-    initial_epsilon=1.0,
-    final_epsilon=0.01,
-    decay_steps=training_cfg['training']['total_timesteps'] // 2  # Decai até metade do treinamento
-)
+        # Configura a exploração baseada nas configurações
+        if training_cfg['exploration'].get('use_softmax', False):
+            exploration_wrapper = lambda obs: softmax_action(model, obs, temperature=training_cfg['exploration'].get('temperature', 0.5))
+        else:
+            exploration_wrapper = EpsilonGreedyWrapper(
+                model,
+                initial_epsilon=training_cfg['exploration'].get('initial_epsilon', 1.0),
+                final_epsilon=training_cfg['exploration'].get('final_epsilon', 0.01),
+                decay_steps=training_cfg['training']['total_timesteps'] // 2
+            )
 
-# Modifica as funções de avaliação para usar o modelo wrapped
+        # Envolve o modelo com o wrapper de epsilon-greedy
+        model_wrapped = EpsilonGreedyWrapper(
+            model,
+            initial_epsilon=1.0,
+            final_epsilon=0.01,
+            decay_steps=training_cfg['training']['total_timesteps'] // 2  # Decai até metade do treinamento
+        )
+        # Cria diretório para salvar checkpoints se não existir
+        checkpoint_dir = training_cfg['checkpoint']['save_path']
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # Callback para salvar checkpoints periódicos
+        checkpoint_callback = CheckpointCallback(
+            save_freq=training_cfg['checkpoint']['save_freq'],
+            save_path=checkpoint_dir,
+            name_prefix='rl_model'
+        )
+        
+        # Callback para avaliação durante o treinamento
+        eval_callback = EvalCallback(
+            eval_env=eval_env,
+            best_model_save_path=os.path.join(checkpoint_dir, 'best_model'),
+            log_path=log_dir,
+            eval_freq=training_cfg['evaluation'].get('eval_freq', 10000),
+            deterministic=True,
+            render=False,
+            n_eval_episodes=training_cfg['evaluation'].get('n_eval_episodes', 5),
+            callback_on_new_best=StopTrainingOnNoModelImprovement(
+                max_no_improvement_evals=training_cfg['evaluation'].get('max_no_improvement', 10),
+                min_evals=training_cfg['evaluation'].get('min_evals', 10),
+                verbose=1
+            ),
+            verbose=1
+        )
+        
+        callbacks = [checkpoint_callback, eval_callback]
+        
+        logging.info(f"Iniciando treinamento por {training_cfg['training']['total_timesteps']} timesteps...")
+        
+        # Treina o modelo usando a função train_model do módulo train_pipeline
+        model = train_model(
+            env=env,
+            model=model_wrapped.model,  # Usa o modelo interno do wrapper
+            total_timesteps=training_cfg['training']['total_timesteps'],
+            callbacks=callbacks,
+            progress_bar=True,
+            tb_log_name=tb_log_name,
+            reset_num_timesteps=True
+        )
+        
+        logging.info("Treinamento concluído com sucesso!")
+        
+        # Retorna o modelo treinado e os dados de teste para avaliação
+        return model, test_df
+        
+    except Exception as e:
+        logging.error(f"Erro durante o treinamento do modelo: {str(e)}")
+        raise
+
+# Executa o treinamento
+
+
 def evaluate_model(env, model_wrapped, price_series, plot=True, name='Validação'):
+    """
+    Avalia o modelo no ambiente fornecido.
+    
+    Args:
+        env: Ambiente de negociação
+        model_wrapped: Modelo treinado (já com wrapper de exploração)
+        price_series: Série temporal de preços para referência
+        plot: Se deve gerar gráficos (não utilizado, mantido para compatibilidade)
+        name: Nome do conjunto de dados para logging
+    """
     logging.info("\n===================== [EVAL] Início da avaliação =====================")
     obs, _ = env.reset()  # Compatível Gymnasium
     terminated = False
@@ -450,46 +544,117 @@ def validate_and_plot(env, model, price_series):
     
     return df_trades
 
-# Avalia o modelo no conjunto de teste
-logging.info("Avaliando modelo final no conjunto de teste...")
-test_env = TradingEnv(
-    df=test_df,
-    window_size=env_cfg['environment']['window_size'],
-    initial_balance=env_cfg['environment']['initial_balance'],
-    fee=env_cfg['environment']['fee'],
-    symbols=env_cfg['environment']['symbols'],
-    strategy=strategy,
-    risk_manager=risk_manager
-)
+# Executa o treinamento e avaliação
+if __name__ == "__main__":
+    try:
+        # Treina o modelo
+        trained_model, test_data = train_agent()
+        logging.info(f"Modelo treinado com sucesso e salvo em {training_cfg['checkpoint']['save_path']}")
+        logging.info(f"Dados de teste disponíveis com {len(test_data)} amostras")
 
-# Carrega o melhor modelo
-if os.path.exists(os.path.join(training_cfg['checkpoint']['save_path'], 'best_model.zip')):
-    logging.info("Carregando o melhor modelo...")
-    best_model = PPO.load(
-        os.path.join(training_cfg['checkpoint']['save_path'], 'best_model'),
-        env=test_env,
-        device=device
-    )
-    # Executa validação detalhada no conjunto de teste
-    trade_log_df = validate_and_plot(test_env, best_model, test_df)
-else:
-    logging.warning("Modelo 'best_model.zip' não encontrado. Usando modelo final.")
-    # Executa validação detalhada no conjunto de teste
-    trade_log_df = validate_and_plot(test_env, model, test_df)
+        # Cria o ambiente de teste
+        logging.info("Avaliando modelo final no conjunto de teste...")
+        test_env = TradingEnv(
+            df=test_df,
+            window_size=env_cfg['environment']['window_size'],
+            initial_balance=env_cfg['environment']['initial_balance'],
+            fee=env_cfg['environment']['fee'],
+            symbols=env_cfg['environment']['symbols'],
+            strategy=strategy,
+            risk_manager=risk_manager
+        )
 
-# Análise de performance
-if 'pnl' in trade_log_df.columns:
-    # Converte a coluna 'pnl' para tipo numérico (float) antes da comparação
-    trade_log_df['pnl'] = pd.to_numeric(trade_log_df['pnl'], errors='coerce')
-    
-    win_rate = (trade_log_df['pnl'] > 0).mean() * 100
-    avg_win = trade_log_df[trade_log_df['pnl'] > 0]['pnl'].mean()
-    avg_loss = trade_log_df[trade_log_df['pnl'] <= 0]['pnl'].mean()
-    profit_factor = abs(trade_log_df[trade_log_df['pnl'] > 0]['pnl'].sum() / 
-                        trade_log_df[trade_log_df['pnl'] <= 0]['pnl'].sum()) if trade_log_df[trade_log_df['pnl'] <= 0]['pnl'].sum() != 0 else float('inf')
-    
-    logging.info(f"Estatísticas finais:")
-    logging.info(f"- Win Rate: {win_rate:.2f}%")
-    logging.info(f"- Profit Factor: {profit_factor:.2f}")
-    logging.info(f"- Média de ganhos: {avg_win:.2f}")
-    logging.info(f"- Média de perdas: {avg_loss:.2f}")
+        # Avalia o modelo no conjunto de validação
+        logging.info("Avaliando modelo no conjunto de validação...")
+        val_env = TradingEnv(
+            df=val_df,
+            window_size=env_cfg['environment']['window_size'],
+            initial_balance=env_cfg['environment']['initial_balance'],
+            fee=env_cfg['environment']['fee'],
+            symbols=env_cfg['environment']['symbols'],
+            strategy=strategy,
+            risk_manager=risk_manager
+        )
+
+        # Gera relatório de performance
+        print("\n" + "="*80)
+        print("RELATÓRIO DE PERFORMANCE")
+        print("="*80)
+        print(f"Data da avaliação: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Ativos: {', '.join(env_cfg['environment']['symbols'])}")
+        print(f"Período: {test_df['timestamp'].min().strftime('%Y-%m-%d')} a {test_df['timestamp'].max().strftime('%Y-%m-%d')}")
+        print(f"Timeframe: {env_cfg['environment']['timeframe']}")
+        print("\n" + "-"*80)
+        print("ESTRATÉGIA E GESTÃO DE RISCO")
+        print("-"*80)
+        print(f"Estratégia: {strategy.__class__.__name__ if strategy else 'Nenhuma'}")
+        print(f"Gestão de Risco: {risk_manager.__class__.__name__ if risk_manager else 'Nenhuma'}")
+        print("\n" + "-"*80)
+        print("DESEMPENHO NOS DADOS DE TESTE")
+        print("-"*80)
+
+        # Calcula métricas de performance
+        initial_balance = env_cfg['environment']['initial_balance']
+        final_balance = test_env.balance + test_env.position * test_env.current_price
+        returns = (final_balance - initial_balance) / initial_balance * 100
+        max_drawdown = test_env.max_drawdown
+        n_trades = test_env.n_trades
+        win_rate = test_env.win_rate * 100 if hasattr(test_env, 'win_rate') else 0
+
+        print(f"Saldo Inicial: ${initial_balance:,.2f}")
+        print(f"Saldo Final: ${final_balance:,.2f}")
+        print(f"Retorno: {returns:.2f}%")
+        print(f"Máximo Drawdown: {max_drawdown:.2f}%")
+        print(f"Número de Trades: {n_trades}")
+        print(f"Taxa de Acerto: {win_rate:.2f}%")
+
+        # Valida o modelo no conjunto de teste
+        logging.info("Executando validação detalhada no conjunto de teste...")
+        trade_log_df = validate_and_plot(test_env, trained_model, test_df['close'])
+        
+        # Análise de performance
+        if not trade_log_df.empty and 'pnl' in trade_log_df.columns:
+            # Converte a coluna 'pnl' para tipo numérico (float) antes da comparação
+            trade_log_df['pnl'] = pd.to_numeric(trade_log_df['pnl'], errors='coerce')
+            
+            win_rate = (trade_log_df['pnl'] > 0).mean() * 100
+            avg_win = trade_log_df[trade_log_df['pnl'] > 0]['pnl'].mean()
+            avg_loss = trade_log_df[trade_log_df['pnl'] <= 0]['pnl'].mean()
+            profit_factor = abs(trade_log_df[trade_log_df['pnl'] > 0]['pnl'].sum() / 
+                                trade_log_df[trade_log_df['pnl'] <= 0]['pnl'].sum()) if trade_log_df[trade_log_df['pnl'] <= 0]['pnl'].sum() != 0 else float('inf')
+            
+            print("\n" + "-"*80)
+            print("MÉTRICAS DETALHADAS DOS TRADES")
+            print("-"*80)
+            print(f"- Win Rate: {win_rate:.2f}%")
+            print(f"- Profit Factor: {profit_factor:.2f}")
+            print(f"- Média de ganhos: ${avg_win:,.2f}" if not pd.isna(avg_win) else "- Média de ganhos: N/A")
+            print(f"- Média de perdas: ${avg_loss:,.2f}" if not pd.isna(avg_loss) else "- Média de perdas: N/A")
+
+        # Gera relatório detalhado de trades
+        if hasattr(test_env, 'trade_log') and test_env.trade_log:
+            print("\n" + "-"*80)
+            print("DETALHES DOS TRADES")
+            print("-"*80)
+            for i, trade in enumerate(test_env.trade_log, 1):
+                print(f"\nTrade #{i}")
+                print(f"Data: {trade['entry_time'].strftime('%Y-%m-%d %H:%M')} a {trade['exit_time'].strftime('%Y-%m-%d %H:%M')}")
+                print(f"Tipo: {'Compra' if trade['position'] > 0 else 'Venda'}")
+                print(f"Preço de Entrada: ${trade['entry_price']:.2f}")
+                print(f"Preço de Saída: ${trade['exit_price']:.2f}")
+                print(f"Resultado: ${trade['pnl']:+,.2f} ({trade['return']:+.2f}%)")
+                print(f"Duração: {trade['duration']} períodos")
+                if 'stop_loss' in trade:
+                    print(f"Stop Loss: ${trade['stop_loss']:.2f}")
+                if 'take_profit' in trade:
+                    print(f"Take Profit: ${trade['take_profit']:.2f}")
+
+        print("\n" + "="*80)
+        print("FIM DO RELATÓRIO")
+        print("="*80)
+
+    except Exception as e:
+        logging.error(f"Erro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

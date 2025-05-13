@@ -38,3 +38,10 @@ exploration:
   temperature: 0.5    # Temperature parameter for softmax
   initial_epsilon: 1.0  # Used if not using softmax
   final_epsilon: 0.01
+
+# Configuração da avaliação durante o treinamento
+evaluation:
+  eval_freq: 10000  # Frequência de avaliação (em passos)
+  n_eval_episodes: 5  # Número de episódios para avaliação
+  max_no_improvement: 10  # Número máximo de avaliações sem melhoria
+  min_evals: 10  # Número mínimo de avaliações antes de parar
